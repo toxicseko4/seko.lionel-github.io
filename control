@@ -1,0 +1,9 @@
+Package: com.sekoandlionel.26safari
+Name: 26Safari
+Depends: mobilesubstrate
+Version: 3.3.0
+Architecture: iphoneos-arm
+Description: iOS 26 "Liquid Glass" style floating bars for iOS 16 Safari
+Maintainer: Seko,lionel
+Author: Seko,lionel
+Section: Tweaks
