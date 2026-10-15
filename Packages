@@ -9,4 +9,5 @@ Section: Tweaks
 Filename: debs/com.sekoandlionel.26safari_3.3.0_iphoneos-arm64.deb
 Size: 39600
 Icon: https://raw.githubusercontent.com/toxicseko4/seko.lionel-github.io/main/icons/com.sekoandlionel.26safari.png
+SileoHeader: https://raw.githubusercontent.com/toxicseko4/seko.lionel-github.io/main/icons/header.png
 SileoDepiction: https://raw.githubusercontent.com/toxicseko4/seko.lionel-github.io/main/depictions/com.sekoandlionel.26safari.json
