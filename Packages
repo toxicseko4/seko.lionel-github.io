@@ -3,6 +3,9 @@ Name: 26safari
 Version: 3.3.0
 Architecture: iphoneos-arm64
 Description: AN AWESOME TWEAK FOR safari
+Maintainer: Seko,Leo
+Author: Seko,Leo
+Section: Tweaks
 Filename: debs/com.sekoandlionel.26safari_3.3.0_iphoneos-arm64.deb
 Size: 39600
 Icon: https://raw.githubusercontent.com/toxicseko4/seko.lionel-github.io/main/icons/com.sekoandlionel.26safari.png
