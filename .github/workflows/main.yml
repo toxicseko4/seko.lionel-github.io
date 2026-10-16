@@ -21,12 +21,12 @@ jobs:
           rm -rf debs packages .theos
           mkdir -p packages
           make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
-          mv packages/*.deb packages/com.sekoandlionel.26safari_rootless.deb || true
+          mv packages/*iphoneos-arm64.deb packages/com.sekoandlionel.26safari_rootless.deb || true
 
       - name: Build Rootful .deb
         run: |
           rm -rf .theos
-          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootful
+          make package FINALPACKAGE=1
           mv packages/*iphoneos-arm.deb packages/com.sekoandlionel.26safari_rootful.deb || true
 
       - name: Build Roothide .deb
