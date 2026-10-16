@@ -1,6 +1,8 @@
 TARGET := iphone:clang:latest:14.0
 ARCHS = arm64 arm64e
 INSTALL_TARGET_PROCESSES = MobileSafari
+THEOS_PACKAGE_DIR_NAME = packages
+
 
 # rootless (Dopamine / palera1n rootless). For rootful palera1n, comment this line out.
 THEOS_PACKAGE_SCHEME = rootless
