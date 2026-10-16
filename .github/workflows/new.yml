@@ -15,13 +15,28 @@ jobs:
           brew install ldid
           git clone --recursive https://github.com/theos/theos.git "$HOME/theos"
           echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
-      - name: Build rootless .deb
-        run: make package FINALPACKAGE=1
 
-      - name: Check the dylib is real
+      - name: Build Rootless .deb
         run: |
-          find .theos/obj -name "26safari.dylib" -exec ls -l {} \; -exec lipo -info {} \; -exec otool -L {} \;
-      - uses: actions/upload-artifact@v4
+          rm -rf debs packages .theos
+          mkdir -p packages
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+          mv packages/*.deb packages/com.sekoandlionel.26safari_rootless.deb || true
+
+      - name: Build Rootful .deb
+        run: |
+          rm -rf .theos
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootful
+          mv packages/*iphoneos-arm.deb packages/com.sekoandlionel.26safari_rootful.deb || true
+
+      - name: Build Roothide .deb
+        run: |
+          rm -rf .theos
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
+          mv packages/*roothide.deb packages/com.sekoandlionel.26safari_roothide.deb || true
+
+      - name: Upload all deb artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: 26safari-deb
+          name: 26safari-debs
           path: packages/*.deb
