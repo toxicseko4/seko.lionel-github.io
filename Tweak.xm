@@ -850,6 +850,278 @@ static void LGHideOverlay(void) {
     gBackSlot.userInteractionEnabled = NO; gMoreSlot.userInteractionEnabled = NO;
 }
 
+// =====================  TYPING MODE  (ADDED: X bubble, no back arrow, loupe lens)  =====================
+// Like real iOS 26 Safari. While you type in the address bar:
+//   - the back arrow goes away,
+//   - the "..." bubble turns into a round X (cancel) bubble,
+//   - a glass lens (loupe) pops up above your finger when you press and hold the field to move the cursor.
+// Purely additive: it only reads the existing state (gKeyboardVisible, gBackSlot, gMoreBtn) and adds new things.
+// Typing in a text box INSIDE a web page does not trigger any of this.
+
+#define LG_TYPING_UI 1    // 1 = hide the back arrow + show the X bubble while typing in the address bar
+#define LG_LENS 1         // 1 = glass loupe lens while you press and hold the address field
+
+static BOOL gTyping = NO;          // keyboard is up AND it is the address bar
+static BOOL gTypingUI = NO;        // the "..." bubble is currently showing as X
+static CGFloat gBackFade = 1;
+static __weak id gFR;
+static __weak UIControl *gCancelCtl;
+static const void *kLGLensKey = &kLGLensKey;
+
+// ask UIKit who the first responder is (public trick: send an action to nil)
+@interface UIResponder (LG26)
+- (void)lg26_grabFR:(id)sender;
+@end
+@implementation UIResponder (LG26)
+- (void)lg26_grabFR:(id)sender { gFR = self; }
+@end
+
+static BOOL LGIsWebInput(id fr) {
+    if (![fr isKindOfClass:UIView.class]) return NO;
+    for (UIView *v = (UIView *)fr; v; v = v.superview) {
+        if ([NSStringFromClass(v.class) hasPrefix:@"WK"]) return YES;
+    }
+    return NO;
+}
+
+static BOOL LGIsCancelText(NSString *t) {
+    if (t.length == 0 || t.length > 12) return NO;
+    NSString *s = [t.lowercaseString stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    return [s isEqualToString:@"cancel"] || [s isEqualToString:@"cancelar"];
+}
+
+static NSString *LGControlText(UIView *v, int depth) {
+    if (depth > 3) return nil;
+    if ([v isKindOfClass:UIButton.class]) {
+        UIButton *b = (UIButton *)v;
+        NSString *t = [b titleForState:UIControlStateNormal] ?: b.titleLabel.text;
+        if (t.length == 0) {
+            if (@available(iOS 15.0, *)) t = b.configuration.title;
+        }
+        if (t.length) return t;
+    }
+    if ([v isKindOfClass:UILabel.class]) return ((UILabel *)v).text;
+    for (UIView *s in v.subviews) {
+        NSString *t = LGControlText(s, depth + 1);
+        if (t.length) return t;
+    }
+    return nil;
+}
+
+// Safari's own "Cancel" button (top right while typing)
+static UIControl *LGFindCancelControl(UIView *root, UIWindow *w, int depth) {
+    if (depth > 12) return nil;
+    for (UIView *s in root.subviews) {
+        if (s.tag == kLGTag) continue;
+        NSString *n = NSStringFromClass(s.class);
+        if ([n hasPrefix:@"WK"] || [n hasPrefix:@"LG"]) continue;
+        if ([s isKindOfClass:UIControl.class] && LGIsCancelText(LGControlText(s, 0))) {
+            CGRect r = [s convertRect:s.bounds toView:w];
+            if (CGRectGetMidY(r) < w.bounds.size.height * 0.5) return (UIControl *)s;
+        }
+        UIControl *r = LGFindCancelControl(s, w, depth + 1);
+        if (r) return r;
+    }
+    return nil;
+}
+
+// called every frame from LGSync, but only does work 10x per second
+static void LGTypingUpdate(UIWindow *w) {
+    static CFTimeInterval last = 0;
+    CFTimeInterval now = CACurrentMediaTime();
+    if (now - last < 0.1) return;
+    last = now;
+    BOOL t = NO;
+    if (gKeyboardVisible) {
+        gFR = nil;
+        [UIApplication.sharedApplication sendAction:@selector(lg26_grabFR:) to:nil from:nil forEvent:nil];
+        t = !LGIsWebInput(gFR);      // if the responder can't be identified it counts as the address bar
+    }
+    gTyping = t;
+#if LG_TYPING_UI
+    // hide Safari's own "Cancel" while our X bubble is showing (a layer mask doesn't fight Safari's alpha/hidden)
+    if (t && (!gCancelCtl || !gCancelCtl.window)) gCancelCtl = LGFindCancelControl(w, w, 0);
+    UIControl *c = gCancelCtl;
+    if (c) {
+        if (t) { if (!c.layer.mask) c.layer.mask = [CALayer layer]; }
+        else if (c.layer.mask) c.layer.mask = nil;
+    }
+#endif
+}
+
+// the X bubble: press Safari's own Cancel, and if the keyboard is still up a moment later just close it
+static void LGDismissTyping(void) {
+    UIWindow *w = gColl.window;
+    if (!w) return;
+    UIControl *c = gCancelCtl ?: LGFindCancelControl(w, w, 0);
+    if (c) [c sendActionsForControlEvents:UIControlEventTouchUpInside];
+    __weak UIWindow *ww = w;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (gKeyboardVisible) [ww endEditing:YES];
+    });
+}
+
+static UIImage *LGSymbolImage(NSString *name) {
+    UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration
+        configurationWithPointSize:19 weight:UIImageSymbolWeightSemibold scale:UIImageSymbolScaleMedium];
+    return [[UIImage systemImageNamed:name withConfiguration:cfg]
+            imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+}
+
+// back arrow fades out while typing, "..." becomes the X bubble (and goes back afterwards)
+static void LGApplyTypingUI(void) {
+#if LG_TYPING_UI
+    BOOL typing = gTyping;
+    CGFloat goal = typing ? 0 : 1;
+    gBackFade += (goal - gBackFade) * 0.28;
+    if (fabs(gBackFade - goal) < 0.02) gBackFade = goal;
+    gBackSlot.alpha *= gBackFade;
+    if (gBackFade < 0.5) gBackSlot.userInteractionEnabled = NO;
+
+    if (typing != gTypingUI && gMoreBtn) {
+        gTypingUI = typing;
+        LGCircle *m = gMoreBtn;
+        [UIView transitionWithView:m.iconView duration:0.18
+                           options:UIViewAnimationOptionTransitionCrossDissolve
+                        animations:^{ m.iconView.image = LGSymbolImage(typing ? @"xmark" : @"ellipsis"); }
+                        completion:nil];
+        if (typing) {
+            m.menu = nil;
+            m.showsMenuAsPrimaryAction = NO;
+            m.onTap = ^{ LGDismissTyping(); };
+        } else {
+            m.onTap = nil;
+            m.showsMenuAsPrimaryAction = YES;
+            m.menu = [UIMenu menuWithChildren:LGMenuActions()];
+        }
+    }
+#endif
+}
+
+// ---------- the loupe lens ----------
+
+static UIView *gLens, *gLensClip, *gLensSnap;
+static BOOL gLensShown = NO;
+
+static void LGLensBuild(void) {
+    if (gLens) return;
+    const CGFloat d = 92;
+    gLens = [[UIView alloc] initWithFrame:CGRectMake(0, 0, d, d)];
+    gLens.userInteractionEnabled = NO;
+    gLensClip = [[UIView alloc] initWithFrame:gLens.bounds];
+    gLensClip.layer.cornerRadius = d / 2;
+    gLensClip.clipsToBounds = YES;
+    gLensClip.backgroundColor = [UIColor colorWithWhite:0.1 alpha:1];
+    [gLens addSubview:gLensClip];
+    LGGlass *g = [[LGGlass alloc] initWithFrame:gLens.bounds];
+    g.tag = kLGTag;
+    g.clearStyle = YES;
+    g.radius = d / 2;
+    [gLens addSubview:g];
+    // chromatic fringe: a red and a blue rim, nudged apart a little
+    NSArray *cols = @[[UIColor colorWithRed:1.0 green:0.25 blue:0.35 alpha:0.38],
+                      [UIColor colorWithRed:0.25 green:0.55 blue:1.0 alpha:0.38]];
+    CGFloat dx[2] = { -1.6, 1.6 };
+    for (int i = 0; i < 2; i++) {
+        CAShapeLayer *sl = [CAShapeLayer layer];
+        sl.frame = gLens.bounds;
+        sl.path = [UIBezierPath bezierPathWithOvalInRect:CGRectInset(gLens.bounds, 2, 2)].CGPath;
+        sl.fillColor = nil;
+        sl.strokeColor = ((UIColor *)cols[i]).CGColor;
+        sl.lineWidth = 2.5;
+        sl.transform = CATransform3DMakeTranslation(dx[i], 0, 0);
+        [gLens.layer addSublayer:sl];
+    }
+    gLens.alpha = 0;
+}
+
+// the lens floats above the finger and magnifies the text around it
+static void LGLensMove(UIWindow *w, CGPoint p) {
+    const CGFloat d = 92, mag = 1.6;
+    CGFloat ww = w.bounds.size.width;
+    CGFloat top = w.safeAreaInsets.top + d / 2 + 6;
+    gLens.center = CGPointMake(MAX(d / 2 + 8, MIN(ww - d / 2 - 8, p.x)), MAX(top, p.y - 92));
+    CGFloat sr = d / mag;
+    CGRect src = CGRectIntersection(CGRectMake(p.x - sr / 2, p.y - sr / 2 - 6, sr, sr), w.bounds);
+    if (CGRectIsNull(src) || src.size.width < 4 || src.size.height < 4) return;
+    UIView *snap = [w resizableSnapshotViewFromRect:src afterScreenUpdates:NO withCapInsets:UIEdgeInsetsZero];
+    if (!snap) return;
+    snap.frame = gLensClip.bounds;
+    [gLensSnap removeFromSuperview];
+    gLensSnap = snap;
+    [gLensClip addSubview:snap];
+}
+
+static void LGLensShow(UIWindow *w) {
+    LGLensBuild();
+    if (gLens.superview != w) [w addSubview:gLens];
+    [w bringSubviewToFront:gLens];
+    if (gLensShown) return;
+    gLensShown = YES;
+    gLens.transform = CGAffineTransformMakeScale(0.35, 0.35);
+    gLens.alpha = 0;
+    [UIView animateWithDuration:0.45 delay:0 usingSpringWithDamping:0.62 initialSpringVelocity:0.9
+                        options:(UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState)
+                     animations:^{ gLens.transform = CGAffineTransformIdentity; gLens.alpha = 1; }
+                     completion:nil];
+}
+
+static void LGLensHide(void) {
+    if (!gLensShown) return;
+    gLensShown = NO;
+    [UIView animateWithDuration:0.22 delay:0 options:UIViewAnimationOptionBeginFromCurrentState
+                     animations:^{ gLens.transform = CGAffineTransformMakeScale(0.4, 0.4); gLens.alpha = 0; }
+                     completion:^(BOOL f) {
+        if (!gLensShown) { [gLensSnap removeFromSuperview]; gLensSnap = nil; }
+    }];
+}
+
+@interface LGLens : NSObject <UIGestureRecognizerDelegate>
++ (void)attachTo:(UIView *)host;
+@end
+@implementation LGLens {
+    BOOL _active;
+}
++ (void)attachTo:(UIView *)host {
+#if LG_LENS
+    if (!host || objc_getAssociatedObject(host, kLGLensKey)) return;
+    LGLens *l = [LGLens new];
+    UILongPressGestureRecognizer *g = [[UILongPressGestureRecognizer alloc] initWithTarget:l action:@selector(handle:)];
+    g.minimumPressDuration = 0.28;
+    g.allowableMovement = CGFLOAT_MAX;
+    g.cancelsTouchesInView = NO;
+    g.delaysTouchesBegan = NO;
+    g.delaysTouchesEnded = NO;
+    g.delegate = l;
+    [host addGestureRecognizer:g];
+    objc_setAssociatedObject(host, kLGLensKey, l, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+#endif
+}
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)a shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)b { return YES; }
+- (void)handle:(UILongPressGestureRecognizer *)g {
+    UIWindow *w = g.view.window;
+    if (!w) { _active = NO; LGLensHide(); return; }
+    switch (g.state) {
+        case UIGestureRecognizerStateBegan:
+            _active = gTyping;                  // only while typing in the address bar
+            if (!_active) return;
+            LGLensShow(w);
+            LGLensMove(w, [g locationInView:w]);
+            break;
+        case UIGestureRecognizerStateChanged:
+            if (_active) LGLensMove(w, [g locationInView:w]);
+            break;
+        case UIGestureRecognizerStateEnded:
+        case UIGestureRecognizerStateCancelled:
+        case UIGestureRecognizerStateFailed:
+            if (_active) { _active = NO; LGLensHide(); }
+            break;
+        default: break;
+    }
+}
+@end
+
 // =====================  PILLS & SBR / HOOKS  =====================
 
 static BOOL LGIsPillObj(id o) { return objc_getAssociatedObject(o, kLGPillKey) != nil; }
@@ -900,6 +1172,7 @@ static void LGTrackPill(UIView *p) {
         LGHookPillClass(p.class);
         [LGTouchFX attachTo:p scale:1.04 scalesHost:NO];
         [LGJelly attachTo:p];
+        [LGLens attachTo:p];
         if (!gMatched) gMatched = [NSMutableSet set];
         [gMatched addObject:NSStringFromClass(p.class)];
     }
@@ -1044,6 +1317,7 @@ static void LGSync(void) {
     UIView *coll = gColl;
     UIWindow *w = coll.window;
     if (!coll || !w) { LGHideOverlay(); return; }
+    LGTypingUpdate(w);
     CGFloat ww = w.bounds.size.width;
     static __weak UIView *lastColl;
     if (coll != lastColl) { lastColl = coll; gShiftY = 0; }
@@ -1144,6 +1418,7 @@ static void LGSync(void) {
     gBackSlot.alpha = fade;
     gMoreSlot.alpha = fade;
     gBackSlot.userInteractionEnabled = gMoreSlot.userInteractionEnabled = fade > 0.5;
+    LGApplyTypingUI();       // typing: back arrow hidden, "..." becomes the X bubble
 
     // Forzamos el botón de retroceso siempre habilitado y totalmente visible
     gBackBtn.enabled = YES;
@@ -1156,7 +1431,7 @@ static void LGSync(void) {
     }
     if (![sig isEqualToString:gMenuSig]) {
         gMenuSig = sig;
-        gMoreBtn.menu = [UIMenu menuWithChildren:LGMenuActions()];
+        if (!gTypingUI) gMoreBtn.menu = [UIMenu menuWithChildren:LGMenuActions()];
     }
 }
 
@@ -1326,6 +1601,23 @@ static void LGSync(void) {
 
 %end // Backgrounds
 
+%group Loupe
+
+// the stock text loupe is replaced by our glass lens while typing in the address bar
+%hook UIView
+- (void)didMoveToWindow {
+    %orig;
+    UIView *v = (UIView *)self;
+    if (!LG_LENS || !gTyping || !v.window) return;
+    NSString *n = NSStringFromClass(v.class);
+    if ([n containsString:@"Loupe"] || [n containsString:@"Magnifier"] || [n containsString:@"Magnifying"]) {
+        if (!v.layer.mask) v.layer.mask = [CALayer layer];     // empty mask = invisible, UIKit's alpha animations can't undo it
+    }
+}
+%end
+
+%end // Loupe
+
 // =====================  START  =====================
 
 %ctor {
@@ -1352,6 +1644,7 @@ static void LGSync(void) {
             %init(Containers);
             %init(Toolbars);
             %init(Backgrounds);
+            %init(Loupe);
             [LGTicker start];
         });
     };
