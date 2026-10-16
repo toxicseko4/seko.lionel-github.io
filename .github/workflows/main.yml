@@ -17,13 +17,17 @@ jobs:
           echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
 
       - name: Build rootless .deb
-        run: make package FINALPACKAGE=1
+        run: |
+          rm -rf debs packages
+          mkdir -p packages
+          make package FINALPACKAGE=1
 
       - name: Check the dylib is real
         run: |
           find .theos/obj -name "26safari.dylib" -exec ls -l {} \; -exec lipo -info {} \; -exec otool -L {} \;
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
           name: 26safari-deb
           path: packages/*.deb
