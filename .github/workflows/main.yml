@@ -21,7 +21,7 @@ jobs:
           rm -rf debs packages .theos
           mkdir -p packages
           make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
-          mv packages/*.deb packages/com.sekoandlionel.26safari_rootless.deb
+          mv packages/*.deb packages/com.sekoandlionel.26safari_rootless.deb || true
 
       - name: Build Rootful .deb
         run: |
