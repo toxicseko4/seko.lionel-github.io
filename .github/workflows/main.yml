@@ -16,27 +16,32 @@ jobs:
           git clone --recursive https://github.com/theos/theos.git "$HOME/theos"
           echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
 
+      - name: Install roothide's Theos fork
+        continue-on-error: true
+        run: git clone --recursive https://github.com/roothide/theos.git "$HOME/theos-roothide"
+
       - name: Build Rootless .deb
         run: |
-          rm -rf debs packages .theos
-          mkdir -p packages
-          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
-          mv packages/*iphoneos-arm64.deb packages/com.sekoandlionel.26safari_rootless.deb || true
+          rm -rf .theos
+          make package SCHEME=rootless FINALPACKAGE=1
 
       - name: Build Rootful .deb
         run: |
           rm -rf .theos
-          make package FINALPACKAGE=1
-          mv packages/*iphoneos-arm.deb packages/com.sekoandlionel.26safari_rootful.deb || true
+          make package SCHEME=rootful FINALPACKAGE=1
 
-      - name: Install Roothide Support & Build Roothide .deb
+      - name: Build Roothide .deb
+        continue-on-error: true
         run: |
           rm -rf .theos
-          git clone https://github.com/roothide/theos.git "$HOME/roothide-theos" || true
-          THEOS="$HOME/roothide-theos" make package FINALPACKAGE=1 SCHEME=roothide || true
-          mv packages/*roothide.deb packages/com.sekoandlionel.26safari_roothide.deb || true
+          THEOS="$HOME/theos-roothide" make package SCHEME=roothide FINALPACKAGE=1
+
+      - name: List the built packages
+        if: always()
+        run: ls -l packages || true
 
       - name: Upload all deb artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: 26safari-debs
