@@ -29,10 +29,11 @@ jobs:
           make package FINALPACKAGE=1
           mv packages/*iphoneos-arm.deb packages/com.sekoandlionel.26safari_rootful.deb || true
 
-      - name: Build Roothide .deb
+      - name: Install Roothide Support & Build Roothide .deb
         run: |
           rm -rf .theos
-          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
+          git clone https://github.com/roothide/theos.git "$HOME/roothide-theos" || true
+          THEOS="$HOME/roothide-theos" make package FINALPACKAGE=1 SCHEME=roothide || true
           mv packages/*roothide.deb packages/com.sekoandlionel.26safari_roothide.deb || true
 
       - name: Upload all deb artifacts
