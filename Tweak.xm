@@ -8,6 +8,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <CoreImage/CoreImage.h>
 
 // ---- glass look ----
 #define LG_LOW_BLUR 1       // 1 = thin backdrop blur (see-through liquid glass), 0 = Apple's stock material blur
@@ -925,6 +926,47 @@ static UIControl *LGFindCancelControl(UIView *root, UIWindow *w, int depth) {
     return nil;
 }
 
+static const void *kLGClearModeKey = &kLGClearModeKey;
+static const void *kLGClearMaskKey = &kLGClearMaskKey;
+static BOOL gClearHidden = NO;
+
+// the small round x INSIDE the address field (not our X bubble): hide it while typing, put it back afterwards
+static void LGHideClear(UIView *root, BOOL hide, int depth) {
+    if (depth > 10) return;
+    for (UIView *s in root.subviews) {
+        if (s.tag == kLGTag) continue;
+        NSString *n = NSStringFromClass(s.class);
+        if ([n hasPrefix:@"WK"] || [n hasPrefix:@"LG"]) continue;
+        if ([s isKindOfClass:UITextField.class]) {
+            UITextField *tf = (UITextField *)s;
+            if (hide) {
+                if (tf.clearButtonMode != UITextFieldViewModeNever) {
+                    objc_setAssociatedObject(tf, kLGClearModeKey, @(tf.clearButtonMode), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                    tf.clearButtonMode = UITextFieldViewModeNever;
+                }
+            } else {
+                NSNumber *m = objc_getAssociatedObject(tf, kLGClearModeKey);
+                if (m) {
+                    tf.clearButtonMode = (UITextFieldViewMode)m.integerValue;
+                    objc_setAssociatedObject(tf, kLGClearModeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                }
+            }
+        }
+        if ([n containsString:@"ClearButton"]) {
+            if (hide) {
+                if (!s.layer.mask) {
+                    s.layer.mask = [CALayer layer];                       // empty mask = invisible
+                    objc_setAssociatedObject(s, kLGClearMaskKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                }
+            } else if (objc_getAssociatedObject(s, kLGClearMaskKey)) {
+                s.layer.mask = nil;
+                objc_setAssociatedObject(s, kLGClearMaskKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+        }
+        LGHideClear(s, hide, depth + 1);
+    }
+}
+
 // called every frame from LGSync, but only does work 10x per second
 static void LGTypingUpdate(UIWindow *w) {
     static CFTimeInterval last = 0;
@@ -946,6 +988,9 @@ static void LGTypingUpdate(UIWindow *w) {
         if (t) { if (!c.layer.mask) c.layer.mask = [CALayer layer]; }
         else if (c.layer.mask) c.layer.mask = nil;
     }
+    // small x inside the field
+    if (t) { LGHideClear(w, YES, 0); gClearHidden = YES; }
+    else if (gClearHidden) { LGHideClear(w, NO, 0); gClearHidden = NO; }
 #endif
 }
 
@@ -970,6 +1015,29 @@ static UIImage *LGSymbolImage(NSString *name) {
 }
 
 // back arrow fades out while typing, "..." becomes the X bubble (and goes back afterwards)
+static __weak UIView *gShiftedPill;
+static CGFloat gTypeShift = 0;
+
+// while typing the field grows to the left (the back arrow is gone) and keeps a gap before the X bubble
+static void LGTypingShift(UIView *active, CGFloat ww) {
+#if LG_TYPING_UI
+    CGFloat goal = (gTyping && gCompactOn && active) ? ((12 + gTargetWidth / 2) - ww / 2) : 0;
+    gTypeShift += (goal - gTypeShift) * 0.25;
+    if (fabs(gTypeShift - goal) < 0.3) gTypeShift = goal;
+    UIView *prev = gShiftedPill;
+    if (prev && prev != active) { prev.transform = CGAffineTransformIdentity; gShiftedPill = nil; prev = nil; }
+    if (active && fabs(gTypeShift) > 0.01) {
+        if (CGAffineTransformIsIdentity(active.transform) || active == prev) {
+            active.transform = CGAffineTransformMakeTranslation(gTypeShift, 0);
+            gShiftedPill = active;
+        }
+    } else if (prev) {
+        prev.transform = CGAffineTransformIdentity;
+        gShiftedPill = nil;
+    }
+#endif
+}
+
 static void LGApplyTypingUI(void) {
 #if LG_TYPING_UI
     BOOL typing = gTyping;
@@ -1000,57 +1068,140 @@ static void LGApplyTypingUI(void) {
 }
 
 // ---------- the loupe lens ----------
+// A round liquid-glass bubble, like the iOS 26 loupe: it magnifies and BENDS whatever is behind it
+// (bump distortion, centre stretched, edge compressed), has a caret in the middle, a darker curved edge,
+// a bright specular rim and a thin red/blue fringe. It also stretches a little in the direction you drag.
 
-static UIView *gLens, *gLensClip, *gLensSnap;
+static UIView *gLens, *gLensClip;
+static CALayer *gLensImg;
 static BOOL gLensShown = NO;
+static CGPoint gLensLast;
+static CGFloat gLensStretch = 1;
+static CIContext *gLensCI;
+static const CGFloat kLensD = 100;     // diameter
+static const CGFloat kLensMag = 1.9;   // magnification
 
 static void LGLensBuild(void) {
     if (gLens) return;
-    const CGFloat d = 92;
-    gLens = [[UIView alloc] initWithFrame:CGRectMake(0, 0, d, d)];
+    gLens = [[UIView alloc] initWithFrame:CGRectMake(0, 0, kLensD, kLensD)];
     gLens.userInteractionEnabled = NO;
+
     gLensClip = [[UIView alloc] initWithFrame:gLens.bounds];
-    gLensClip.layer.cornerRadius = d / 2;
+    gLensClip.layer.cornerRadius = kLensD / 2;
     gLensClip.clipsToBounds = YES;
-    gLensClip.backgroundColor = [UIColor colorWithWhite:0.1 alpha:1];
+    gLensClip.backgroundColor = [UIColor colorWithWhite:0.12 alpha:1];
     [gLens addSubview:gLensClip];
+
+    // the magnified, bent picture of what is behind the lens
+    gLensImg = [CALayer layer];
+    gLensImg.frame = gLensClip.bounds;
+    gLensImg.contentsGravity = kCAGravityResizeAspectFill;
+    [gLensClip.layer addSublayer:gLensImg];
+
+    // darker, curved edge: makes it feel like thick glass
+    CAGradientLayer *vig = [CAGradientLayer layer];
+    vig.type = kCAGradientLayerRadial;
+    vig.frame = gLensClip.bounds;
+    vig.colors = @[(id)[UIColor colorWithWhite:0 alpha:0].CGColor,
+                   (id)[UIColor colorWithWhite:0 alpha:0.38].CGColor];
+    vig.locations = @[@0.62, @1.0];
+    vig.startPoint = CGPointMake(0.5, 0.5);
+    vig.endPoint = CGPointMake(1.0, 0.5);
+    [gLensClip.layer addSublayer:vig];
+
+    // caret in the middle
+    CALayer *caret = [CALayer layer];
+    caret.frame = CGRectMake(kLensD / 2 - 1, kLensD / 2 - 19, 2, 38);
+    caret.cornerRadius = 1;
+    caret.backgroundColor = [UIColor colorWithRed:0.2 green:0.65 blue:1.0 alpha:1].CGColor;
+    [gLensClip.layer addSublayer:caret];
+
+    // glass rim + glow
     LGGlass *g = [[LGGlass alloc] initWithFrame:gLens.bounds];
     g.tag = kLGTag;
     g.clearStyle = YES;
-    g.radius = d / 2;
+    g.radius = kLensD / 2;
     [gLens addSubview:g];
+
     // chromatic fringe: a red and a blue rim, nudged apart a little
-    NSArray *cols = @[[UIColor colorWithRed:1.0 green:0.25 blue:0.35 alpha:0.38],
-                      [UIColor colorWithRed:0.25 green:0.55 blue:1.0 alpha:0.38]];
-    CGFloat dx[2] = { -1.6, 1.6 };
+    NSArray *cols = @[[UIColor colorWithRed:1.0 green:0.25 blue:0.35 alpha:0.55],
+                      [UIColor colorWithRed:0.25 green:0.55 blue:1.0 alpha:0.55]];
+    CGFloat dx[2] = { -1.8, 1.8 };
     for (int i = 0; i < 2; i++) {
         CAShapeLayer *sl = [CAShapeLayer layer];
         sl.frame = gLens.bounds;
-        sl.path = [UIBezierPath bezierPathWithOvalInRect:CGRectInset(gLens.bounds, 2, 2)].CGPath;
+        sl.path = [UIBezierPath bezierPathWithOvalInRect:CGRectInset(gLens.bounds, 2.5, 2.5)].CGPath;
         sl.fillColor = nil;
         sl.strokeColor = ((UIColor *)cols[i]).CGColor;
-        sl.lineWidth = 2.5;
+        sl.lineWidth = 3;
         sl.transform = CATransform3DMakeTranslation(dx[i], 0, 0);
         [gLens.layer addSublayer:sl];
     }
     gLens.alpha = 0;
 }
 
-// the lens floats above the finger and magnifies the text around it
+// draw what is behind the lens into a small image, bend it, put it in the lens
+static void LGLensRender(UIWindow *w) {
+    static CFTimeInterval last = 0;
+    CFTimeInterval now = CACurrentMediaTime();
+    if (now - last < 0.033) return;           // 30 fps is plenty
+    last = now;
+    CGFloat sr = kLensD / kLensMag;
+    CGPoint c = gLens.center;
+    CGRect src = CGRectMake(c.x - sr / 2, c.y - sr / 2, sr, sr);
+
+    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat preferredFormat];
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:src.size format:fmt];
+    BOOL wasHidden = gLens.hidden;
+    gLens.hidden = YES;                        // never photograph ourselves
+    UIImage *img = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        [w drawViewHierarchyInRect:CGRectMake(-src.origin.x, -src.origin.y, w.bounds.size.width, w.bounds.size.height)
+                afterScreenUpdates:NO];
+    }];
+    gLens.hidden = wasHidden;
+    if (!img.CGImage) return;
+
+    id result = (__bridge id)img.CGImage;
+    @try {
+        if (!gLensCI) gLensCI = [CIContext contextWithOptions:nil];
+        CIImage *ci = [CIImage imageWithCGImage:img.CGImage];
+        CGRect ext = ci.extent;
+        CIFilter *f = [CIFilter filterWithName:@"CIBumpDistortion"];
+        [f setValue:ci forKey:kCIInputImageKey];
+        [f setValue:[CIVector vectorWithX:CGRectGetMidX(ext) Y:CGRectGetMidY(ext)] forKey:kCIInputCenterKey];
+        [f setValue:@(ext.size.width * 0.58) forKey:kCIInputRadiusKey];
+        [f setValue:@(0.55) forKey:kCIInputScaleKey];
+        CIImage *out = f.outputImage;
+        if (out) {
+            CGImageRef bent = [gLensCI createCGImage:out fromRect:ext];
+            if (bent) {
+                result = (__bridge_transfer id)bent;     // ARC releases it
+            }
+        }
+    } @catch (NSException *e) { }
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    gLensImg.contents = result;
+    [CATransaction commit];
+}
+
+// the lens floats above the finger; it leans into the direction you drag
 static void LGLensMove(UIWindow *w, CGPoint p) {
-    const CGFloat d = 92, mag = 1.6;
     CGFloat ww = w.bounds.size.width;
-    CGFloat top = w.safeAreaInsets.top + d / 2 + 6;
-    gLens.center = CGPointMake(MAX(d / 2 + 8, MIN(ww - d / 2 - 8, p.x)), MAX(top, p.y - 92));
-    CGFloat sr = d / mag;
-    CGRect src = CGRectIntersection(CGRectMake(p.x - sr / 2, p.y - sr / 2 - 6, sr, sr), w.bounds);
-    if (CGRectIsNull(src) || src.size.width < 4 || src.size.height < 4) return;
-    UIView *snap = [w resizableSnapshotViewFromRect:src afterScreenUpdates:NO withCapInsets:UIEdgeInsetsZero];
-    if (!snap) return;
-    snap.frame = gLensClip.bounds;
-    [gLensSnap removeFromSuperview];
-    gLensSnap = snap;
-    [gLensClip addSubview:snap];
+    CGFloat top = w.safeAreaInsets.top + kLensD / 2 + 6;
+    gLens.center = CGPointMake(MAX(kLensD / 2 + 8, MIN(ww - kLensD / 2 - 8, p.x)), MAX(top, p.y - 98));
+
+    CGFloat dx = fabs(p.x - gLensLast.x);
+    gLensLast = p;
+    CGFloat goal = 1.0 + MIN(dx / 36.0, 1.0) * 0.12;
+    gLensStretch += (goal - gLensStretch) * 0.35;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    gLens.layer.sublayerTransform = CATransform3DMakeScale(gLensStretch, 1.0 / gLensStretch, 1);
+    [CATransaction commit];
+
+    LGLensRender(w);
 }
 
 static void LGLensShow(UIWindow *w) {
@@ -1059,6 +1210,9 @@ static void LGLensShow(UIWindow *w) {
     [w bringSubviewToFront:gLens];
     if (gLensShown) return;
     gLensShown = YES;
+    gLensLast = CGPointZero;
+    gLensStretch = 1;
+    gLens.layer.sublayerTransform = CATransform3DIdentity;
     gLens.transform = CGAffineTransformMakeScale(0.35, 0.35);
     gLens.alpha = 0;
     [UIView animateWithDuration:0.45 delay:0 usingSpringWithDamping:0.62 initialSpringVelocity:0.9
@@ -1072,9 +1226,7 @@ static void LGLensHide(void) {
     gLensShown = NO;
     [UIView animateWithDuration:0.22 delay:0 options:UIViewAnimationOptionBeginFromCurrentState
                      animations:^{ gLens.transform = CGAffineTransformMakeScale(0.4, 0.4); gLens.alpha = 0; }
-                     completion:^(BOOL f) {
-        if (!gLensShown) { [gLensSnap removeFromSuperview]; gLensSnap = nil; }
-    }];
+                     completion:nil];
 }
 
 @interface LGLens : NSObject <UIGestureRecognizerDelegate>
@@ -1107,7 +1259,8 @@ static void LGLensHide(void) {
             _active = gTyping;                  // only while typing in the address bar
             if (!_active) return;
             LGLensShow(w);
-            LGLensMove(w, [g locationInView:w]);
+            gLensLast = [g locationInView:w];
+            LGLensMove(w, gLensLast);
             break;
         case UIGestureRecognizerStateChanged:
             if (_active) LGLensMove(w, [g locationInView:w]);
@@ -1323,7 +1476,7 @@ static void LGSync(void) {
     if (coll != lastColl) { lastColl = coll; gShiftY = 0; }
     static CGFloat lastW = 0;
     if (fabs(ww - lastW) > 0.5) { lastW = ww; gRestH = 0; }
-    gTargetWidth = ww - 128;
+    gTargetWidth = ww - ((LG_TYPING_UI && gTyping) ? 80 : 128);   // typing: field is wider (no back arrow)
 
     if (!gToolbarView || !gToolbarView.window) {
         UIView *f = LGFindToolbar(w, 0);
@@ -1356,6 +1509,11 @@ static void LGSync(void) {
             CGRect b = p.bounds;
             b.size.width = gTargetWidth;
             p.bounds = b;
+        } else if (LG_TYPING_UI && gTyping && gCompactOn &&
+                   p.bounds.size.width > 100 && p.bounds.size.width < gTargetWidth - 2) {
+            CGRect b = p.bounds;                    // typing: grow the field into the back arrow's space
+            b.size.width = gTargetWidth;
+            p.bounds = b;
         }
         if (p.hidden || p.alpha < 0.05) continue;
         CGRect r = LGWindowRect(p, w);
@@ -1364,6 +1522,7 @@ static void LGSync(void) {
         if (off < best) { best = off; active = p; aR = r; }
     }
 
+    LGTypingShift(active, ww);
     LGScrubThrottled(coll, 0.06);
     if (tb && tb.window) LGScrubThrottled(tb, 0.06);
 

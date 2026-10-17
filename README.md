@@ -32,12 +32,16 @@ buttons, a compact one-row layout, and the "alive" feel of iOS 26 when you touch
   springs back with a small overshoot, plus a soft haptic tap.
 
 **Typing mode** (while you type in the address bar, like real iOS 26)
-- The back arrow fades out.
+- The back arrow fades out and the address field **grows to the left** into its space (it keeps a small gap
+  before the X bubble, like real iOS 26).
+- The small round x *inside* the field (the clear-text button) is hidden. Only the X bubble remains.
 - The "..." bubble turns into a round **X** bubble. It presses Safari's own Cancel, and if the keyboard is
   still up a moment later it closes it. Safari's stock "Cancel" button is hidden while the X is showing.
-- **Loupe lens:** press and hold the address field to move the cursor and a round glass lens pops up above
-  your finger, magnifying the text around it (with a thin red/blue chromatic edge). Safari's stock loupe is
-  hidden while the lens is in use.
+- **Loupe lens:** press and hold the address field to move the cursor and a round liquid-glass lens pops up
+  above your finger. Like the real iOS 26 loupe it **magnifies and bends whatever is behind it** (bump
+  distortion: stretched centre, compressed edge), with a caret in the middle, a darker curved edge, a bright
+  specular rim and a thin red/blue chromatic fringe. It stretches a little in the direction you drag and pops
+  up with a spring. Safari's stock loupe is hidden while the lens is in use.
 - Typing inside a text box on a web page does **not** trigger any of this.
 
 ---
@@ -112,6 +116,11 @@ All switches are `#define`s at the top of `Tweak.xm` (rebuild after changing).
   `LGTouchFX`, `LGBounceFX` and `LGJelly` add the touch behaviour. `LGLens` is the loupe.
 - **Typing detection.** The keyboard being visible is not enough (it also shows for web page inputs), so the
   tweak asks UIKit who the first responder is and ignores anything that lives inside a web view.
+- **Lens rendering.** While the lens is up, the part of the window behind it is drawn into a small image
+  (never including the lens itself), bent with `CIBumpDistortion` (CoreImage) and shown inside the bubble
+  at about 30 fps. This is why `CoreImage` is in the Makefile's frameworks.
+- **Wider field while typing.** The pill's width target changes from `width - 128` to `width - 80` while you
+  type, and the pill is slid left with a translation transform (easing in and out), so hit-testing follows it.
 - **Safe fallbacks.** If the toolbar's buttons can't be found, Safari's normal toolbar stays visible.
   Tab overview / Done screens fall back to Safari's stock layout.
 
@@ -132,8 +141,9 @@ All switches are `#define`s at the top of `Tweak.xm` (rebuild after changing).
 ## Known limits
 
 - No real refraction or lensing (public UIKit can't do it on iOS 16).
-- The address field in typing mode keeps Safari's width (it is not stretched to the left like iOS 26).
-- The loupe lens is an approximation built from a magnified snapshot, not Apple's loupe.
+- The loupe lens is an approximation (a magnified, bent picture of what is behind it), not Apple's loupe.
+- The small x inside the field is hidden by its class name and by turning off the text field's clear button.
+  If it still shows on your iOS, send the class name found with FLEX.
 - iPad is not handled.
 
 ## Project layout
@@ -141,7 +151,7 @@ All switches are `#define`s at the top of `Tweak.xm` (rebuild after changing).
 ```
 26safari/
   Tweak.xm                  all of the tweak
-  Makefile                  Theos build (arm64 + arm64e, rootless)
+  Makefile                  Theos build (arm64 + arm64e, rootless; links UIKit, QuartzCore, CoreImage)
   control                   package info (com.sekoandlionel.26safari)
   26safari.plist            injects into com.apple.mobilesafari only
   .github/workflows/build.yml   GitHub Actions build
@@ -150,6 +160,9 @@ All switches are `#define`s at the top of `Tweak.xm` (rebuild after changing).
 
 ## Changelog
 
+- **3.5.0** Address field extends to the left while typing, small clear (x) button hidden, and the loupe lens
+  rebuilt as a real liquid bubble (magnifies and bends what is behind it, caret, curved edge, red/blue fringe,
+  drag stretch). Makefile now links CoreImage.
 - **3.4.0** Typing mode: back arrow hidden, X bubble, stock Cancel hidden, glass loupe lens. README rewritten.
 - **3.3.0** Jelly touch: the glass leans toward the finger and springs back, plus a soft haptic tap.
 - **3.2.0** Window-level round buttons driven by one ticker, roles read from the toolbar's real buttons,
