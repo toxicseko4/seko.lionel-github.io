@@ -1,0 +1,38 @@
+name: Repository Build & Package Compression
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Theos and ldid
+        run: |
+          brew install ldid
+          git clone --recursive https://github.com/theos/theos.git "$HOME/theos"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+
+      - name: Build Rootless .deb
+        run: |
+          rm -rf debs packages .theos
+          mkdir -p packages
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+          mv packages/*iphoneos-arm64.deb packages/com.sekoandlionel.26safari_rootless.deb || true
+
+      - name: Compress Packages index
+        run: |
+          bzip2 -c9 Packages > Packages.bz2
+          xz -c9 Packages > Packages.xz
+
+      - name: Upload all deb artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: 26safari-debs
+          path: |
+            packages/*.deb
+            Packages.bz2
+            Packages.xz
